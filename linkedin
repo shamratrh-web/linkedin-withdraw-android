@@ -1,0 +1,259 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Goal-driven LinkedIn invitation withdrawal
+# Classifies current screen → picks transition toward goal → repeats
+set -o pipefail
+
+SU=/debug_ramdisk/su
+STOP_FLAG="/data/local/tmp/linkedin-stop-flag"
+LOG="/sdcard/linkedin-debug.log"
+SS="/sdcard/li_ss.png"
+TESSDATA="$PREFIX/share/tessdata"
+MAX=50
+MAX_UNKNOWN=8
+
+log() { echo "$(date +%H:%M:%S) $*" >> "$LOG"; }
+
+check_stop() {
+  if [ -f "$STOP_FLAG" ]; then
+    log "STOP"
+    rm -f "$STOP_FLAG"; exit 0
+  fi
+}
+
+cleanup() { rm -f /sdcard/li_ss.png; }
+trap cleanup EXIT
+trap 'log "SIGTERM/SIGINT"; exit 0' TERM INT
+
+su_sys() {
+  check_stop
+  $SU -c "unset LD_LIBRARY_PATH LD_PRELOAD; PATH=/debug_ramdisk:/sbin:/system/bin:/system/xbin $*" 2>/dev/null
+}
+
+ss() { su_sys "screencap -p $SS"; }
+
+# tesseract TSV output: level page block par line word left top width height conf text
+#                              $1    $2    $3  $4   $5   $6   $7  $8   $9   $10  $11  $12
+ocr_tsv() {
+  TESSDATA_PREFIX=$TESSDATA tesseract "$SS" stdout -l eng tsv 2>/dev/null
+}
+
+ocr_text() {
+  TESSDATA_PREFIX=$TESSDATA tesseract "$SS" stdout -l eng 2>/dev/null
+}
+
+# Find first word match: echoes "x y w h conf text"
+find_word() {
+  local word="$1" min_conf="${2:-30}"
+  ocr_tsv | awk -F'\t' -v w="$word" -v mc="$min_conf" '
+    NR>1 && $11+0 > mc && tolower($12) ~ tolower(w) { print $7, $8, $9, $10, $11, $12; exit }
+  '
+}
+
+# Find all word matches (for multi-instance like "Withdraw" buttons)
+find_all_words() {
+  local word="$1" min_conf="${2:-30}"
+  ocr_tsv | awk -F'\t' -v w="$word" -v mc="$min_conf" '
+    NR>1 && $11+0 > mc && tolower($12) ~ tolower(w) { print $7, $8, $9, $10, $11, $12 }
+  '
+}
+
+tap_bbox() { su_sys "input tap $(($1 + $3 / 2)) $(($2 + $4 / 2))"; }
+tap_at() { su_sys "input tap $1 $2"; }
+tap_back() { su_sys "input keyevent KEYCODE_BACK"; }
+swipe_down() { su_sys "input swipe 540 1800 540 400 200"; }
+swipe_up() { su_sys "input swipe 540 400 540 1400 300"; }
+
+# ─── Screen classifier ──────────────────────────────────────────
+
+detect_screen() {
+  ss || { echo "ERROR"; return; }
+  local lower
+  lower=$(ocr_text | tr '[:upper:]' '[:lower:]')
+
+  # Order: most unique text first
+  contains "invitations sent"     && { echo "SENT_LIST";      return; }
+  contains "invitations received" && { echo "RECEIVED_LIST";  return; }
+  contains "are you sure"         && { echo "CONFIRM";        return; }
+  contains "withdraw this"        && { echo "CONFIRM";        return; }
+  contains "cancel"               && [ -n "$(find_word 'Withdraw' 30)" ] && { echo "CONFIRM"; return; }
+  contains "withdraw"             && { echo "HAS_WITHDRAW";   return; }
+  contains "start a post"         && { echo "FEED";           return; }
+  contains "my network"           && contains "manage"        && { echo "MANAGE";        return; }
+  contains "people you may know"  && { echo "MY_NETWORK";     return; }
+  echo "UNKNOWN"
+}
+
+# Helper: check if a substring exists in a variable
+contains() { [[ "$lower" == *"$1"* ]]; }
+
+# ─── Scroll-to-bottom with hash detection ───────────────────────
+
+scroll_to_bottom() {
+  local same=0 prev_hash="" h
+  ss
+  prev_hash=$(md5sum "$SS" 2>/dev/null | cut -d' ' -f1)
+  for _ in $(seq 1 40); do
+    check_stop
+    swipe_down
+    sleep 0.2
+    ss
+    h=$(md5sum "$SS" 2>/dev/null | cut -d' ' -f1)
+    [ "$h" = "$prev_hash" ] && same=$((same + 1)) || same=0
+    [ "$same" -ge 3 ] && { log "Bottom reached"; return; }
+    prev_hash=$h
+  done
+}
+
+# ─── Main goal loop ─────────────────────────────────────────────
+
+log "=== GOAL-DRIVEN WITHDRAW ==="
+rm -f "$STOP_FLAG"
+
+log "Initial load..."; sleep 5
+
+count=0
+unknown=0
+stuck=0
+prev_screen=""
+last_withdraw_pos=""
+
+while [ "$count" -lt "$MAX" ]; do
+  check_stop
+  screen=$(detect_screen)
+  log "Screen: $screen | withdrawn: $count"
+
+  # Stuck detection — same screen 4× in a row → force alternate action
+  [ "$screen" = "$prev_screen" ] && stuck=$((stuck + 1)) || stuck=0
+  prev_screen=$screen
+  if [ "$stuck" -ge 4 ]; then
+    log "Stuck on $screen, forcing scroll up"
+    swipe_up
+    sleep 1.5
+    stuck=0
+  fi
+
+  case "$screen" in
+
+    SENT_LIST|HAS_WITHDRAW)
+      # Find Withdraw buttons, prefer bottom-most (closest to visible area)
+      local buttons coords x y w ww wh
+      buttons=$(find_all_words "Withdraw" 30 | sort -k2 -rn)
+
+      if [ -z "$buttons" ]; then
+        log "No Withdraw buttons visible, scrolling"
+        stuck=0
+        buttons=$(find_all_words "Withdraw" 30 | sort -k2 -rn)
+        if [ -z "$buttons" ]; then
+          scroll_to_bottom
+          swipe_up
+          sleep 0.5
+          buttons=$(find_all_words "Withdraw" 30 | sort -k2 -rn)
+        fi
+        if [ -z "$buttons" ]; then
+          log "No Withdraw found after scrolling entire list"
+          echo "$count withdrawn"
+          exit 0
+        fi
+      fi
+
+      # Pick the top-most Withdraw button (smallest y)
+      coords=$(echo "$buttons" | sort -k2 -n | head -1)
+      read x y ww wh _ _ <<< "$coords"
+
+      # Avoid tapping same position repeatedly (same button)
+      local cur_pos="${x}_${y}"
+      [ "$cur_pos" = "$last_withdraw_pos" ] && {
+        log "Same button, scrolling past it"
+        swipe_down
+        sleep 0.5
+        continue
+      }
+      last_withdraw_pos="$cur_pos"
+
+      log "Tapping Withdraw at x=$x y=$y"
+      tap_bbox $x $y $ww $wh
+      sleep 2.5
+      unknown=0
+
+      # Check if confirm dialog appeared
+      local subscreen
+      subscreen=$(detect_screen)
+      if [ "$subscreen" = "CONFIRM" ]; then
+        log "Confirm dialog, tapping confirm"
+        tap_at 780 2250
+        sleep 1.5
+        count=$((count + 1))
+        log "Withdrawn: $count"
+        # Reset last position so next button gets picked fresh
+        last_withdraw_pos=""
+      else
+        log "No confirm dialog (screen=$subscreen), continuing"
+      fi
+      ;;
+
+    CONFIRM)
+      log "Confirm dialog, tapping confirm"
+      tap_at 780 2250
+      sleep 1.5
+      count=$((count + 1))
+      log "Withdrawn: $count"
+      unknown=0
+      ;;
+
+    RECEIVED_LIST)
+      log "On Received tab, tapping Sent"
+      local sent
+      sent=$(find_word "Sent" 30)
+      if [ -n "$sent" ]; then
+        read sx sy sw sh _ _ <<< "$sent"
+        tap_bbox $sx $sy $sw $sh
+      else
+        tap_at 540 324
+      fi
+      sleep 2
+      unknown=0
+      ;;
+
+    MANAGE|MY_NETWORK)
+      log "On manage page, tapping Sent tab"
+      local sent
+      sent=$(find_word "Sent" 30)
+      if [ -n "$sent" ]; then
+        read sx sy sw sh _ _ <<< "$sent"
+        tap_bbox $sx $sy $sw $sh
+        sleep 2
+      else
+        # Fallback: tap manage → scroll down for sent tab
+        tap_at 540 324
+        sleep 1
+      fi
+      unknown=0
+      ;;
+
+    FEED)
+      log "On feed, tapping My Network"
+      tap_at 900 120
+      sleep 3
+      unknown=0
+      ;;
+
+    UNKNOWN)
+      log "Unknown screen, backing out"
+      tap_back
+      sleep 2
+      unknown=$((unknown + 1))
+      if [ "$unknown" -ge "$MAX_UNKNOWN" ]; then
+        log "Too many unknowns ($MAX_UNKNOWN), aborting"
+        exit 1
+      fi
+      ;;
+
+    ERROR)
+      log "Screenshot failed, retry"
+      sleep 2
+      ;;
+  esac
+done
+
+log "Max ($MAX) reached"
+echo "$count withdrawn"
