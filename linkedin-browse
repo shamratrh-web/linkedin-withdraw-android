@@ -1,0 +1,147 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# AI-powered LinkedIn feed browsing & engagement
+set -o pipefail
+
+SU=/debug_ramdisk/su
+STOP_FLAG="/data/local/tmp/linkedin-stop-flag"
+LOG="/sdcard/linkedin-browse.log"
+SS="/sdcard/li_ss.png"
+TESSDATA="$PREFIX/share/tessdata"
+TSX_WRAPPER=~/bin/tsx
+AI_SCRIPT="/data/data/com.termux/files/home/linkedin-android/ai/analyze.ts"
+DEEPSEEK_TOKEN="${DEEPSEEK_TOKEN:-}"
+MAX_ENGAGE=20
+
+log() { echo "$(date +%H:%M:%S) $*" >> "$LOG"; }
+
+check_stop() {
+  if [ -f "$STOP_FLAG" ]; then log "STOP"; rm -f "$STOP_FLAG"; exit 0; fi
+}
+
+cleanup() { rm -f /sdcard/li_ss.png; }
+trap cleanup EXIT
+trap 'log "SIGTERM/SIGINT"; exit 0' TERM INT
+
+su_sys() {
+  check_stop
+  $SU -c "unset LD_LIBRARY_PATH LD_PRELOAD; PATH=/debug_ramdisk:/sbin:/system/bin:/system/xbin $*" 2>/dev/null
+}
+
+ss() { su_sys "screencap -p $SS"; }
+
+ocr_text() {
+  TESSDATA_PREFIX=$TESSDATA tesseract "$SS" stdout -l eng 2>/dev/null
+}
+
+find_word() {
+  local word="$1" min_conf="${2:-30}"
+  TESSDATA_PREFIX=$TESSDATA tesseract "$SS" stdout -l eng tsv 2>/dev/null | awk -F'\t' -v w="$word" -v mc="$min_conf" '
+    NR>1 && $11+0 > mc && tolower($12) ~ tolower(w) { print $7, $8, $9, $10; exit }
+  '
+}
+
+tap_bbox() { su_sys "input tap $(($1 + $3 / 2)) $(($2 + $4 / 2))"; }
+tap_at() { su_sys "input tap $1 $2"; }
+tap_back() { su_sys "input keyevent KEYCODE_BACK"; }
+swipe_down() { su_sys "input swipe 540 1500 540 300 300"; }
+type_text() { su_sys "input text $(echo "$1" | sed "s/ /%/g; s/'/%27/g; s/!/%21/g; s/?/%3F/g; s/,/%2C/g; s/\./%2E/g")"; }
+
+# ─── AI classifier ────────────────────────────────────────────
+
+detect_screen() {
+  ss || { echo "ERROR"; return; }
+  local text
+  text=$(ocr_text | tr '\n' ' ' | tr -s ' ')
+  local result
+  result=$(DEEPSEEK_TOKEN="$DEEPSEEK_TOKEN" \
+    WASM_PATH="/data/data/com.termux/files/home/resume-forge-ai/lib/ai/wasm/sha3_wasm_bg.wasm" \
+    "$TSX_WRAPPER" "$AI_SCRIPT" "$text" 2>>"$LOG")
+  log "AI: $result"
+  echo "$result"
+}
+
+parse_field() { echo "$1" | grep "^$2:" | sed "s/^$2: *//" | head -1; }
+
+# ─── Main loop ────────────────────────────────────────────────
+
+log "=== AI BROWSE & ENGAGE ==="
+rm -f "$STOP_FLAG"
+[ -n "$DEEPSEEK_TOKEN" ] && log "AI enabled" || { log "DEEPSEEK_TOKEN required"; exit 1; }
+
+su_sys "am start -a android.intent.action.VIEW -d 'https://www.linkedin.com/feed/' 2>/dev/null"
+log "Loading LinkedIn..."
+sleep 8
+
+engage_count=0
+no_change=0
+prev_hash=""
+
+while [ "$engage_count" -lt "$MAX_ENGAGE" ]; do
+  check_stop
+
+  ai=$(detect_screen)
+  screen=$(parse_field "$ai" "SCREEN")
+  action=$(parse_field "$ai" "ACTION")
+  like=$(parse_field "$ai" "LIKE")
+  comment=$(parse_field "$ai" "COMMENT")
+
+  log "Screen=$screen Action=$action Like=$like"
+
+  # Scroll detection (no new content)
+  ss
+  h=$(md5sum "$SS" 2>/dev/null | cut -d' ' -f1)
+  [ "$h" = "$prev_hash" ] && no_change=$((no_change + 1)) || no_change=0
+  prev_hash=$h
+  [ "$no_change" -ge 5 ] && { log "No new content, done"; break; }
+
+  case "$screen" in
+    FEED|FEED_POST)
+      if [ "$action" = "ENGAGE" ] && [ "$like" = "yes" ]; then
+        log "Liking post..."
+        local like_coords
+        like_coords=$(find_word "Like" 30)
+        [ -n "$like_coords" ] && tap_bbox $like_coords
+        sleep 1
+
+        if [ -n "$comment" ]; then
+          log "Commenting: $comment"
+          local comment_coords
+          comment_coords=$(find_word "Comment" 30)
+          [ -n "$comment_coords" ] && tap_bbox $comment_coords
+          sleep 2
+          type_text "$comment"
+          sleep 1
+          local post_coords
+          post_coords=$(find_word "Post" 30)
+          [ -n "$post_coords" ] && tap_bbox $post_coords
+          sleep 2
+          engage_count=$((engage_count + 1))
+          log "Engaged: $engage_count"
+        fi
+      fi
+      log "Scrolling..."
+      swipe_down; sleep 1
+      ;;
+
+    COMMENT_BOX)
+      log "Posting comment..."
+      [ -n "$comment" ] && type_text "$comment"
+      sleep 1
+      local post_coords
+      post_coords=$(find_word "Post" 30)
+      [ -n "$post_coords" ] && tap_bbox $post_coords
+      sleep 2
+      ;;
+
+    PROFILE)
+      log "On profile, going back"; tap_back; sleep 2
+      ;;
+
+    *)
+      log "$screen — scrolling"; swipe_down; sleep 1
+      ;;
+  esac
+done
+
+log "Done - engaged $engage_count times"
+echo "$engage_count engagements"
