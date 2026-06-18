@@ -98,20 +98,17 @@ while [ "$engage_count" -lt "$MAX_ENGAGE" ]; do
     FEED|FEED_POST)
       if [ "$action" = "ENGAGE" ] && [ "$like" = "yes" ]; then
         log "Liking post..."
-        local like_coords
         like_coords=$(find_word "Like" 30)
         [ -n "$like_coords" ] && tap_bbox $like_coords
         sleep 1
 
         if [ -n "$comment" ]; then
           log "Commenting: $comment"
-          local comment_coords
           comment_coords=$(find_word "Comment" 30)
           [ -n "$comment_coords" ] && tap_bbox $comment_coords
           sleep 2
           type_text "$comment"
           sleep 1
-          local post_coords
           post_coords=$(find_word "Post" 30)
           [ -n "$post_coords" ] && tap_bbox $post_coords
           sleep 2
