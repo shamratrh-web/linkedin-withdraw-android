@@ -44,7 +44,12 @@ tap_bbox() { su_sys "input tap $(($1 + $3 / 2)) $(($2 + $4 / 2))"; }
 tap_at() { su_sys "input tap $1 $2"; }
 tap_back() { su_sys "input keyevent KEYCODE_BACK"; }
 swipe_down() { su_sys "input swipe 540 1500 540 300 300"; }
-type_text() { su_sys "input text $(echo "$1" | sed "s/ /%/g; s/'/%27/g; s/!/%21/g; s/?/%3F/g; s/,/%2C/g; s/\./%2E/g")"; }
+type_text() {
+  local t="$1"
+  # Android input text uses %s for space
+  t="${t// /%s}"
+  su_sys "input text '$t'"
+}
 
 # ─── AI classifier ────────────────────────────────────────────
 
