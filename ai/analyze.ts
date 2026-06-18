@@ -1,70 +1,53 @@
 import { DeepSeekAPI } from '/data/data/com.termux/files/home/resume-forge-ai/lib/ai/DeepSeek.ts';
 
-const DEEPSEEK_TOKEN = process.env.DEEPSEEK_TOKEN || '';
-if (!DEEPSEEK_TOKEN) {
-  console.error('ERROR: DEEPSEEK_TOKEN environment variable required');
-  process.exit(1);
-}
+const TOKEN = process.env.DEEPSEEK_TOKEN || '';
+if (!TOKEN) { console.error('ERROR: DEEPSEEK_TOKEN required'); exit(1); }
 
-const api = new DeepSeekAPI(DEEPSEEK_TOKEN);
+const api = new DeepSeekAPI(TOKEN);
 
 async function classify(ocrText: string): Promise<string> {
   await api.init();
   const sessionId = await api.createSession();
 
-  const prompt = `You are a LinkedIn UI automation assistant. Your job is to analyze the OCR text extracted from a screenshot of the LinkedIn Android app and determine what screen is shown and what action to take next.
+  const gen = api.chatCompletion(sessionId,
+    `You are classifying a LinkedIn Android screen from OCR text. Pick exactly ONE:
 
-The GOAL is to withdraw sent LinkedIn invitations.
+SCREEN = SENT_LIST (sent invites visible with Withdraw buttons)
+        | RECEIVED_LIST (received invites with Accept/Ignore)
+        | MANAGE (Manage heading + Sent/Received tabs)
+        | CONFIRM (Withdraw confirmation dialog)
+        | FEED (home feed)
+        | EMPTY (no invites)
+        | UNKNOWN
 
-OCR text from screenshot:
-"""
-${ocrText.slice(0, 2000)}
-"""
+ACTION = TAP_WITHDRAW | TAP_SENT | TAP_CONFIRM | SCROLL_DOWN | SCROLL_UP | GO_BACK | DONE | WAIT
 
-Analyze and respond in EXACTLY this format (no other text):
-SCREEN: <screen_type>
-ACTION: <action>
-REASON: <short_reason>
+Reply ONLY these 3 lines, nothing else:
+SCREEN: <one choice>
+ACTION: <one choice>
+REASON: <one line reason>
 
-Screen types:
-- SENT_LIST — "Invitations sent" heading visible, Withdraw buttons on cards
-- RECEIVED_LIST — "Invitations received" heading visible, Accept/Ignore buttons
-- MANAGE — "Manage" heading, "Sent" and "Received" tab buttons visible
-- CONFIRM — withdraw confirmation dialog ("Are you sure", "Withdraw this invitation", Cancel)
-- FEED — LinkedIn home feed ("Start a post", news articles)
-- PROFILE — user profile ("Message", "Activity", "About")
-- EMPTY — "No pending invitations" or similar empty state
-- UNKNOWN — cannot determine from provided text
+OCR text: """${ocrText.slice(0, 2000)}"""`,
+    false, []
+  );
 
-Actions:
-- TAP_SENT — tap the Sent tab
-- TAP_WITHDRAW — tap a Withdraw button on a sent invitation card
-- TAP_CONFIRM — tap the confirm button in the dialog (COORDS: 780 2250)
-- SCROLL_DOWN — scroll down to see more content
-- SCROLL_UP — scroll up slightly
-- GO_BACK — press Android back button
-- TAP_MY_NETWORK — tap My Network icon to navigate
-- TAP_MANAGE — tap Manage button
-- WAIT — wait and retry
-- DONE — no more invitations to withdraw, exit successfully
-- ESCALATE — unexpected state, exit with error
-
-If you see "Withdraw" text in a dialog context (near "Cancel" or "Are you sure"), classify as CONFIRM.`;
-
-  const response = await api.chatCompletion(sessionId, prompt).next();
-  return response.value?.content || '';
+  let result = '';
+  let firstContent = 0;
+  try {
+    for await (const chunk of gen) {
+      if (chunk.content) {
+        if (!firstContent) firstContent = Date.now();
+        result += chunk.content;
+        if (Date.now() - firstContent > 3000) break;
+      }
+    }
+  } finally {
+    try { gen.return?.(); } catch {}
+  }
+  return result.trim() || 'SCREEN: UNKNOWN\nACTION: WAIT\nREASON: no AI response';
 }
 
-const ocrText = process.argv[2] || '';
-if (!ocrText) {
-  console.error('ERROR: Usage: analyze.ts <ocr-text>');
-  console.error('       Provide OCR text from screenshot as single argument');
-  process.exit(1);
-}
+const ocrText = process.argv[2];
+if (!ocrText) { console.error('Usage: analyze.ts <ocr-text>'); process.exit(1); }
 
-classify(ocrText)
-  .then((result) => console.log(result))
-  .catch((err: any) => {
-    console.error(`ERROR: ${err?.message || String(err)}`);
-    process.exit(1);
-  });
+classify(ocrText).then(r => console.log(r)).catch(e => { console.error(`ERROR: ${e?.message || e}`); process.exit(1); });

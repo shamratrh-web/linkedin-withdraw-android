@@ -74,7 +74,9 @@ detect_screen_ai() {
   text=$(ocr_text | tr '\n' ' ' | tr -s ' ')
   log "OCR: $text"
   local result
-  result=$(DEEPSEEK_TOKEN="$DEEPSEEK_TOKEN" "$TSX_WRAPPER" "$AI_SCRIPT" "$text" 2>>"$LOG")
+  result=$(DEEPSEEK_TOKEN="$DEEPSEEK_TOKEN" \
+    WASM_PATH="/data/data/com.termux/files/home/resume-forge-ai/lib/ai/wasm/sha3_wasm_bg.wasm" \
+    "$TSX_WRAPPER" "$AI_SCRIPT" "$text" 2>>"$LOG")
   log "AI: $result"
   local screen
   screen=$(echo "$result" | grep "^SCREEN:" | sed 's/^SCREEN: *//' | tr '[:lower:]' '[:upper:]')
@@ -102,11 +104,13 @@ detect_screen_ocr() {
 }
 
 detect_screen() {
+  local s
   if ai_ready; then
-    detect_screen_ai
-  else
-    detect_screen_ocr
+    s=$(detect_screen_ai)
+    [ "$s" != "UNKNOWN" ] && [ "$s" != "ERROR" ] && { echo "$s"; return; }
+    log "AI returned $s, falling back to OCR"
   fi
+  detect_screen_ocr
 }
 
 # ─── Scroll-to-bottom ───────────────────────────────────────────
@@ -131,8 +135,14 @@ log "=== AI-GUIDED WITHDRAW ==="
 rm -f "$STOP_FLAG"
 ai_ready && log "AI mode: enabled" || log "AI mode: disabled (set DEEPSEEK_TOKEN)"
 
-log "Initial load..."
-sleep 5
+log "Launching LinkedIn..."
+su_sys "am start -a android.intent.action.VIEW -d 'https://www.linkedin.com/mynetwork/invitation-manager/' 2>/dev/null"
+log "Waiting for LinkedIn..."
+sleep 8
+
+log "Checking initial screen..."
+first_screen=$(detect_screen)
+log "Initial: $first_screen"
 
 count=0
 stuck=0
