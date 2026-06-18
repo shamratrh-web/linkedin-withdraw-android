@@ -55,12 +55,10 @@ type_text() {
 
 detect_screen() {
   ss || { echo "ERROR"; return; }
-  local text
   text=$(ocr_text | tr '\n' ' ' | tr -s ' ')
-  local result
   result=$(DEEPSEEK_TOKEN="$DEEPSEEK_TOKEN" \
     WASM_PATH="/data/data/com.termux/files/home/resume-forge-ai/lib/ai/wasm/sha3_wasm_bg.wasm" \
-    "$TSX_WRAPPER" "$AI_SCRIPT" "$text" 2>>"$LOG")
+    "$TSX_WRAPPER" "$AI_SCRIPT" "$SS" "$text" 2>>"$LOG")
   log "AI: $result"
   echo "$result"
 }
@@ -129,7 +127,6 @@ while [ "$engage_count" -lt "$MAX_ENGAGE" ]; do
       log "Posting comment..."
       [ -n "$comment" ] && type_text "$comment"
       sleep 1
-      local post_coords
       post_coords=$(find_word "Post" 30)
       [ -n "$post_coords" ] && tap_bbox $post_coords
       sleep 2
